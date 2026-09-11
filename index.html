@@ -54,6 +54,25 @@
         .dot.bk{background:radial-gradient(circle at 36% 36%,#555,#111)}
         .dot.wh{background:radial-gradient(circle at 36% 36%,#fff,#c8c0b0)}
 
+        /* ── Mode selector ── */
+        .mode-select{
+            display:flex;
+            border:1px solid var(--accent);
+            border-radius:4px;
+            overflow:hidden;
+        }
+        .mode-btn{
+            font-family:'Noto Serif SC',serif;font-size:.85rem;
+            padding:7px 22px;
+            background:transparent;border:none;
+            color:var(--text-muted);cursor:pointer;
+            transition:all .25s;letter-spacing:.08em;
+            border-right:1px solid rgba(200,164,78,.2);
+        }
+        .mode-btn:last-child{border-right:none}
+        .mode-btn.active{background:var(--accent);color:var(--bg)}
+        .mode-btn:not(.active):hover{color:var(--accent);background:rgba(200,164,78,.08)}
+
         .frame{
             padding:16px;
             background:linear-gradient(145deg,#9a7a20,#7a5a10);
@@ -85,18 +104,25 @@
 
         .win-text{color:var(--accent-light);font-weight:600;animation:pulse 1.4s ease infinite}
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+        .think{animation:blink 1s ease infinite}
+        @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 
         @media(max-width:660px){
             .title{font-size:1.7rem;letter-spacing:.25em}
             .wrap{padding:24px 8px;gap:16px}
             .frame{padding:10px}
             .btn{padding:8px 22px;font-size:.85rem}
+            .mode-btn{font-size:.78rem;padding:6px 16px}
         }
     </style>
 </head>
 <body>
 <div class="wrap">
     <h1 class="title">五子棋</h1>
+    <div class="mode-select">
+        <button class="mode-btn active" id="pvpBtn">人人对战</button>
+        <button class="mode-btn" id="pveBtn">人机对战</button>
+    </div>
     <div class="status" id="st"><span class="dot bk"></span><span>黑棋先行</span></div>
     <div class="frame"><canvas id="cv"></canvas></div>
     <div class="ctrls">
@@ -111,6 +137,9 @@
 </div>
 
 <script>
+/* ═══════════════════════════════════════════
+   常量 & 变量
+   ═══════════════════════════════════════════ */
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
 const st=document.getElementById('st'),s1E=document.getElementById('s1'),s2E=document.getElementById('s2');
 
@@ -124,7 +153,15 @@ const DIRS=[[0,1],[1,0],[1,1],[1,-1]];
 let bd,cur,over,last,win,hist,sc={1:0,2:0};
 let hover=null,wPhase=0,wRAF=null;
 
-/* ── pre-render board bg ── */
+/* ── 人机模式 ── */
+let mode='pvp';          // 'pvp' | 'pve'
+const aiColor=2;         // AI 白棋
+const humanColor=1;      // 人类黑棋
+let aiThinking=false;
+
+/* ═══════════════════════════════════════════
+   棋盘底纹预渲染（原逻辑不变）
+   ═══════════════════════════════════════════ */
 const bgC=document.createElement('canvas');bgC.width=W;bgC.height=W;
 const bgX=bgC.getContext('2d');
 (function initBg(){
@@ -155,7 +192,9 @@ const bgX=bgC.getContext('2d');
     }
 })();
 
-/* ── draw helpers ── */
+/* ═══════════════════════════════════════════
+   绘制函数（原逻辑不变）
+   ═══════════════════════════════════════════ */
 function drawStone(r,c,p,isW){
     const x=PAD+c*CELL,y=PAD+r*CELL;
     ctx.save();
@@ -170,7 +209,6 @@ function drawStone(r,c,p,isW){
     }
     ctx.restore();
 }
-
 function drawGhost(r,c){
     if(bd[r][c])return;
     const x=PAD+c*CELL,y=PAD+r*CELL;
@@ -181,7 +219,6 @@ function drawGhost(r,c){
     ctx.beginPath();ctx.arc(x,y,SR,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
     ctx.restore();
 }
-
 function render(){
     ctx.drawImage(bgC,0,0);
     for(let r=0;r<N;r++)for(let c=0;c<N;c++){
@@ -198,7 +235,9 @@ function render(){
     if(hover&&!over)drawGhost(hover.r,hover.c);
 }
 
-/* ── logic ── */
+/* ═══════════════════════════════════════════
+   判胜逻辑（原逻辑不变）
+   ═══════════════════════════════════════════ */
 function check(r,c,p){
     for(const[dr,dc]of DIRS){
         let cnt=1;
@@ -216,68 +255,329 @@ function getLine(r,c,p){
     }return null;
 }
 
-function place(r,c){
-    if(bd[r][c]||over)return;
-    bd[r][c]=cur;hist.push({r,c,p:cur});last=[r,c];
-    if(check(r,c,cur)){
-        over=true;win=getLine(r,c,cur);sc[cur]++;
-        s1E.textContent=sc[1];s2E.textContent=sc[2];
-        setStatus(cur===1?'黑棋获胜！':'白棋获胜！');startWin();
-    }else if(hist.length===N*N){
-        over=true;setStatus('平局！');
-    }else{cur=cur===1?2:1;setStatus()}
-    render();cv.style.cursor=over?'default':'pointer';
+/* ═══════════════════════════════════════════
+   ★ AI 引擎：加权评分策略
+   ═══════════════════════════════════════════ */
+
+/*
+ * 权重表 —— 值越大威胁等级越高
+ * 五连 → 活四 → 冲四 → 活三 → 眠三 → 活二 → 眠二 → 活一
+ */
+const AI_W = {
+    FIVE:        10000000,   // 成五，直接赢
+    LIVE_FOUR:    1000000,   // 活四，下一步必赢
+    RUSH_FOUR:     100000,   // 冲四，必须应对
+    LIVE_THREE:     50000,   // 活三，可发展为活四
+    SLEEP_THREE:     5000,   // 眠三
+    LIVE_TWO:        1000,   // 活二
+    SLEEP_TWO:        100,   // 眠二
+    LIVE_ONE:          10    // 活一（孤立但两端通的单子）
+};
+
+/**
+ * 分析 (r,c) 在某个方向上落子后的连续棋型
+ * 返回 { count: 连子数, open: 开放端数(0/1/2) }
+ */
+function analyzeDir(r, c, dr, dc, player) {
+    // 正方向连续
+    let pc = 0;
+    for (let i = 1; i <= 4; i++) {
+        const nr = r + dr * i, nc = c + dc * i;
+        if (nr >= 0 && nr < N && nc >= 0 && nc < N && bd[nr][nc] === player) pc++;
+        else break;
+    }
+    // 正方向末端是否开放
+    let po = 0;
+    const peR = r + dr * (pc + 1), peC = c + dc * (pc + 1);
+    if (peR >= 0 && peR < N && peC >= 0 && peC < N && bd[peR][peC] === 0) po = 1;
+
+    // 负方向连续
+    let nc2 = 0;
+    for (let i = 1; i <= 4; i++) {
+        const nr = r - dr * i, nc = c - dc * i;
+        if (nr >= 0 && nr < N && nc >= 0 && nc < N && bd[nr][nc] === player) nc2++;
+        else break;
+    }
+    let no = 0;
+    const neR = r - dr * (nc2 + 1), neC = c - dc * (nc2 + 1);
+    if (neR >= 0 && neR < N && neC >= 0 && neC < N && bd[neR][neC] === 0) no = 1;
+
+    return { count: pc + nc2 + 1, open: po + no };
 }
 
-function undo(){
-    if(!hist.length||over)return;
-    const m=hist.pop();bd[m.r][m.c]=0;cur=m.p;
-    last=hist.length?[hist[hist.length-1].r,hist[hist.length-1].c]:null;
-    win=null;if(wRAF)cancelAnimationFrame(wRAF);wPhase=0;
-    setStatus();render();
+/**
+ * 根据连子数和开放端返回基础分数
+ */
+function pScore(count, open) {
+    if (count >= 5) return AI_W.FIVE;
+    if (count === 4) return open >= 2 ? AI_W.LIVE_FOUR : open === 1 ? AI_W.RUSH_FOUR : 0;
+    if (count === 3) return open >= 2 ? AI_W.LIVE_THREE : open === 1 ? AI_W.SLEEP_THREE : 0;
+    if (count === 2) return open >= 2 ? AI_W.LIVE_TWO : open === 1 ? AI_W.SLEEP_TWO : 0;
+    if (count === 1) return open >= 2 ? AI_W.LIVE_ONE : 0;
+    return 0;
 }
 
-function setStatus(msg){
-    if(msg){st.innerHTML=`<span class="win-text">${msg}</span>`}
-    else{const cls=cur===1?'bk':'wh',nm=cur===1?'黑棋':'白棋';st.innerHTML=`<span class="dot ${cls}"></span><span>${nm}的回合</span>`}
+/**
+ * 综合评估在 (r,c) 落 player 子的分数
+ * 同时检测多方向组合威胁（双活三、冲四活三、双冲四等）
+ */
+function evalPoint(r, c, player) {
+    bd[r][c] = player;
+    let score = 0;
+    let liveFour = 0, rushFour = 0, liveThree = 0;
+
+    for (const [dr, dc] of DIRS) {
+        const d = analyzeDir(r, c, dr, dc, player);
+        score += pScore(d.count, d.open);
+        if (d.count === 4 && d.open >= 2) liveFour++;
+        if (d.count === 4 && d.open === 1) rushFour++;
+        if (d.count === 3 && d.open >= 2) liveThree++;
+    }
+
+    /* ── 组合威胁加分 ── */
+    if (liveFour >= 1)   score += AI_W.LIVE_FOUR * 2;       // 活四=必赢
+    if (rushFour >= 2)   score += AI_W.LIVE_FOUR;           // 双冲四=必赢
+    if (rushFour >= 1 && liveThree >= 1) score += AI_W.LIVE_FOUR * 0.9;  // 冲四+活三=必赢
+    if (liveThree >= 2)  score += AI_W.LIVE_FOUR * 0.7;     // 双活三=极强
+
+    bd[r][c] = 0;
+    return score;
 }
 
-function startWin(){
-    wPhase=0;
-    (function anim(){wPhase+=.07;render();if(over&&win)wRAF=requestAnimationFrame(anim)})();
+/**
+ * 获取候选落子位置（已有棋子周围 2 格内的空位）
+ */
+function getCandidates() {
+    const s = new Set();
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+        if (bd[r][c]) {
+            for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) {
+                const nr = r + dr, nc = c + dc;
+                if (nr >= 0 && nr < N && nc >= 0 && nc < N && !bd[nr][nc])
+                    s.add(nr * N + nc);
+            }
+        }
+    }
+    return [...s].map(v => ({ r: ~~(v / N), c: v % N }));
 }
 
-function posOf(mx,my){
-    const c=Math.round((mx-PAD)/CELL),r=Math.round((my-PAD)/CELL);
-    if(r>=0&&r<N&&c>=0&&c<N)return{r,c};return null;
+/**
+ * AI 选择最佳落子位置
+ * 策略优先级：即时赢 > 堵对手赢 > 评分最高
+ */
+function aiGetBestMove() {
+    const cands = getCandidates();
+    if (!cands.length) return { r: 7, c: 7 };
+
+    /* ① 能赢就赢 */
+    for (const { r, c } of cands) {
+        bd[r][c] = aiColor;
+        if (check(r, c, aiColor)) { bd[r][c] = 0; return { r, c }; }
+        bd[r][c] = 0;
+    }
+    /* ② 必须堵对手的赢 */
+    for (const { r, c } of cands) {
+        bd[r][c] = humanColor;
+        if (check(r, c, humanColor)) { bd[r][c] = 0; return { r, c }; }
+        bd[r][c] = 0;
+    }
+    /* ③ 加权评分 */
+    let best = -Infinity, moves = [];
+    for (const { r, c } of cands) {
+        const atk = evalPoint(r, c, aiColor);       // 进攻分
+        const def = evalPoint(r, c, humanColor);     // 防守分（对手若在此落子的分）
+        let total = atk * 1.05 + def;                // 进攻略高于防守
+        // 中心偏好评分（极小权重，仅作平局打破）
+        total += (7 - Math.abs(r - 7) + 7 - Math.abs(c - 7)) * 0.5;
+
+        if (total > best) { best = total; moves = [{ r, c }]; }
+        else if (Math.abs(total - best) < 0.1) moves.push({ r, c });
+    }
+    return moves[~~(Math.random() * moves.length)];
 }
 
-/* ── events ── */
-cv.addEventListener('mousemove',e=>{
-    const rc=cv.getBoundingClientRect();
-    hover=posOf((e.clientX-rc.left)*W/rc.width,(e.clientY-rc.top)*W/rc.height);
-    if(!over)render();
+/**
+ * 延迟调度 AI 落子（给 UI 留出刷新时间）
+ */
+function scheduleAiMove() {
+    aiThinking = true;
+    cv.style.cursor = 'wait';
+    setStatus();
+    const t0 = Date.now();
+    setTimeout(() => {
+        if (!aiThinking) return;                     // 用户可能中途重置了
+        const move = aiGetBestMove();
+        const elapsed = Date.now() - t0;
+        setTimeout(() => {
+            if (!aiThinking) return;
+            aiThinking = false;
+            cv.style.cursor = 'pointer';
+            if (move) doPlace(move.r, move.c);
+        }, Math.max(0, 250 - elapsed));              // 保证至少约 300ms 的思考动画
+    }, 50);
+}
+
+/* ═══════════════════════════════════════════
+   游戏流程（重构：doPlace / place / undo）
+   ═══════════════════════════════════════════ */
+
+/**
+ * 核心落子逻辑（双方共用）
+ */
+function doPlace(r, c) {
+    if (bd[r][c] || over) return;
+    bd[r][c] = cur;
+    hist.push({ r, c, p: cur });
+    last = [r, c];
+
+    if (check(r, c, cur)) {
+        over = true;
+        win = getLine(r, c, cur);
+        sc[cur]++;
+        s1E.textContent = sc[1];
+        s2E.textContent = sc[2];
+        let msg;
+        if (cur === 1) msg = '黑棋获胜！';
+        else if (mode === 'pve') msg = 'AI 获胜！';
+        else msg = '白棋获胜！';
+        setStatus(msg);
+        startWin();
+    } else if (hist.length === N * N) {
+        over = true;
+        setStatus('平局！');
+    } else {
+        cur = cur === 1 ? 2 : 1;
+        setStatus();
+    }
+    render();
+    cv.style.cursor = over ? 'default' : 'pointer';
+}
+
+/**
+ * 人类落子入口
+ */
+function place(r, c) {
+    if (aiThinking || over) return;
+    doPlace(r, c);
+    // 人机模式下自动触发 AI
+    if (mode === 'pve' && !over && cur === aiColor) {
+        scheduleAiMove();
+    }
+}
+
+/**
+ * 悔棋
+ * 人机模式：一次回退两步（AI + 人类）
+ * 人人模式：一次回退一步
+ */
+function undo() {
+    if (!hist.length || aiThinking) return;
+    if (over && mode === 'pvp') return;
+
+    // 如果游戏已结束，先恢复进行状态
+    if (over) {
+        over = false;
+        win = null;
+        if (wRAF) cancelAnimationFrame(wRAF);
+        wPhase = 0;
+    }
+
+    if (mode === 'pve') {
+        // 回退到人类回合：若最后一步是 AI 的，则撤两步；否则撤一步
+        const cnt = (hist.length && hist[hist.length - 1].p === aiColor) ? 2 : 1;
+        for (let i = 0; i < cnt && hist.length; i++) {
+            const m = hist.pop();
+            bd[m.r][m.c] = 0;
+            cur = m.p;
+        }
+    } else {
+        const m = hist.pop();
+        bd[m.r][m.c] = 0;
+        cur = m.p;
+    }
+
+    last = hist.length ? [hist[hist.length - 1].r, hist[hist.length - 1].c] : null;
+    win = null;
+    if (wRAF) cancelAnimationFrame(wRAF);
+    wPhase = 0;
+    setStatus();
+    render();
+    cv.style.cursor = 'pointer';
+}
+
+function setStatus(msg) {
+    if (msg) {
+        const cls = msg.includes('获胜') ? 'win-text' : '';
+        st.innerHTML = `<span class="${cls}">${msg}</span>`;
+    } else {
+        const cls = cur === 1 ? 'bk' : 'wh';
+        const nm = cur === 1 ? '黑棋' : '白棋';
+        if (mode === 'pve' && cur === aiColor) {
+            st.innerHTML = `<span class="dot ${cls}"></span><span class="think">AI 思考中...</span>`;
+        } else {
+            st.innerHTML = `<span class="dot ${cls}"></span><span>${nm}的回合</span>`;
+        }
+    }
+}
+
+function startWin() {
+    wPhase = 0;
+    (function anim() { wPhase += .07; render(); if (over && win) wRAF = requestAnimationFrame(anim); })();
+}
+
+function posOf(mx, my) {
+    const c = Math.round((mx - PAD) / CELL), r = Math.round((my - PAD) / CELL);
+    if (r >= 0 && r < N && c >= 0 && c < N) return { r, c };
+    return null;
+}
+
+/* ═══════════════════════════════════════════
+   事件处理
+   ═══════════════════════════════════════════ */
+cv.addEventListener('mousemove', e => {
+    if (aiThinking) return;
+    const rc = cv.getBoundingClientRect();
+    hover = posOf((e.clientX - rc.left) * W / rc.width, (e.clientY - rc.top) * W / rc.height);
+    if (!over) render();
 });
-cv.addEventListener('mouseleave',()=>{hover=null;if(!over)render()});
-cv.addEventListener('click',e=>{
-    const rc=cv.getBoundingClientRect();
-    const p=posOf((e.clientX-rc.left)*W/rc.width,(e.clientY-rc.top)*W/rc.height);
-    if(p)place(p.r,p.c);
+cv.addEventListener('mouseleave', () => { hover = null; if (!over) render(); });
+cv.addEventListener('click', e => {
+    if (aiThinking) return;
+    const rc = cv.getBoundingClientRect();
+    const p = posOf((e.clientX - rc.left) * W / rc.width, (e.clientY - rc.top) * W / rc.height);
+    if (p) place(p.r, p.c);
 });
-cv.addEventListener('touchstart',e=>{
-    e.preventDefault();const t=e.touches[0],rc=cv.getBoundingClientRect();
-    const p=posOf((t.clientX-rc.left)*W/rc.width,(t.clientY-rc.top)*W/rc.height);
-    if(p)place(p.r,p.c);
-},{passive:false});
+cv.addEventListener('touchstart', e => {
+    if (aiThinking) return;
+    e.preventDefault();
+    const t = e.touches[0], rc = cv.getBoundingClientRect();
+    const p = posOf((t.clientX - rc.left) * W / rc.width, (t.clientY - rc.top) * W / rc.height);
+    if (p) place(p.r, p.c);
+}, { passive: false });
 
-document.getElementById('rstBtn').addEventListener('click',init);
-document.getElementById('undoBtn').addEventListener('click',undo);
+document.getElementById('rstBtn').addEventListener('click', init);
+document.getElementById('undoBtn').addEventListener('click', undo);
 
-function init(){
-    bd=Array.from({length:N},()=>Array(N).fill(0));
-    cur=1;over=false;last=null;win=null;hist=[];hover=null;
-    if(wRAF)cancelAnimationFrame(wRAF);wPhase=0;
-    setStatus();cv.style.cursor='pointer';render();
+/* ── 模式切换 ── */
+function setMode(m) {
+    mode = m;
+    document.getElementById('pvpBtn').classList.toggle('active', m === 'pvp');
+    document.getElementById('pveBtn').classList.toggle('active', m === 'pve');
+    init();
+}
+document.getElementById('pvpBtn').addEventListener('click', () => setMode('pvp'));
+document.getElementById('pveBtn').addEventListener('click', () => setMode('pve'));
+
+/* ── 初始化 ── */
+function init() {
+    bd = Array.from({ length: N }, () => Array(N).fill(0));
+    cur = 1; over = false; last = null; win = null;
+    hist = []; hover = null; aiThinking = false;
+    if (wRAF) cancelAnimationFrame(wRAF);
+    wPhase = 0;
+    setStatus();
+    cv.style.cursor = 'pointer';
+    render();
 }
 
 init();
