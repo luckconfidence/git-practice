@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>五子棋</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        :root{
+            --bg:#1a1714;
+            --surface:#242019;
+            --accent:#c8a44e;
+            --accent-light:#e8d48b;
+            --text:#f0ece4;
+            --text-muted:#8a8070;
+        }
+        body{
+            font-family:'Noto Serif SC',serif;
+            background:var(--bg);
+            color:var(--text);
+            min-height:100vh;
+            display:flex;align-items:center;justify-content:center;
+            overflow-x:hidden;
+        }
+        body::before{
+            content:'';position:fixed;inset:0;
+            background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+            opacity:.6;pointer-events:none;z-index:0;
+        }
+        .wrap{
+            position:relative;z-index:1;
+            display:flex;flex-direction:column;align-items:center;gap:22px;
+            padding:40px 20px;
+            animation:fadeUp .7s ease;
+        }
+        @keyframes fadeUp{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
+
+        .title{
+            font-size:2.6rem;font-weight:700;
+            letter-spacing:.35em;color:var(--accent);
+            text-shadow:0 2px 12px rgba(200,164,78,.25);
+        }
+        .status{
+            display:flex;align-items:center;gap:10px;
+            font-size:1.05rem;color:var(--text-muted);
+            min-height:28px;
+        }
+        .dot{
+            width:18px;height:18px;border-radius:50%;
+            box-shadow:0 1px 3px rgba(0,0,0,.3);
+        }
+        .dot.bk{background:radial-gradient(circle at 36% 36%,#555,#111)}
+        .dot.wh{background:radial-gradient(circle at 36% 36%,#fff,#c8c0b0)}
+
+        .frame{
+            padding:16px;
+            background:linear-gradient(145deg,#9a7a20,#7a5a10);
+            border-radius:8px;
+            box-shadow:0 14px 44px rgba(0,0,0,.55),0 4px 14px rgba(0,0,0,.35),
+                        inset 0 1px 0 rgba(255,255,255,.08);
+            position:relative;
+        }
+        canvas{display:block;cursor:pointer;max-width:100%;height:auto;border-radius:2px}
+
+        .ctrls{display:flex;gap:14px}
+        .btn{
+            font-family:'Noto Serif SC',serif;font-size:.92rem;
+            padding:10px 30px;letter-spacing:.12em;
+            border:1px solid var(--accent);background:0;color:var(--accent);
+            border-radius:4px;cursor:pointer;transition:all .25s ease;
+        }
+        .btn:hover{background:var(--accent);color:var(--bg);letter-spacing:.18em}
+        .btn:active{transform:scale(.97)}
+
+        .score{
+            display:flex;gap:32px;font-size:.88rem;color:var(--text-muted);
+            align-items:center;
+        }
+        .score .item{display:flex;align-items:center;gap:7px}
+        .score .dot{width:13px;height:13px}
+        .score .num{color:var(--accent);font-size:1.15rem;font-weight:600}
+        .score .sep{color:var(--text-muted);opacity:.3;margin:0 4px}
+
+        .win-text{color:var(--accent-light);font-weight:600;animation:pulse 1.4s ease infinite}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+
+        @media(max-width:660px){
+            .title{font-size:1.7rem;letter-spacing:.25em}
+            .wrap{padding:24px 8px;gap:16px}
+            .frame{padding:10px}
+            .btn{padding:8px 22px;font-size:.85rem}
+        }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <h1 class="title">五子棋</h1>
+    <div class="status" id="st"><span class="dot bk"></span><span>黑棋先行</span></div>
+    <div class="frame"><canvas id="cv"></canvas></div>
+    <div class="ctrls">
+        <button class="btn" id="undoBtn">悔 棋</button>
+        <button class="btn" id="rstBtn">重新开始</button>
+    </div>
+    <div class="score">
+        <div class="item"><span class="dot bk"></span><span>黑棋</span><span class="num" id="s1">0</span></div>
+        <span class="sep">|</span>
+        <div class="item"><span class="dot wh"></span><span>白棋</span><span class="num" id="s2">0</span></div>
+    </div>
+</div>
+
+<script>
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+const st=document.getElementById('st'),s1E=document.getElementById('s1'),s2E=document.getElementById('s2');
+
+const N=15,CELL=40,PAD=30,SR=17;
+const W=(N-1)*CELL+PAD*2;
+cv.width=W;cv.height=W;
+
+const STARS=[3,7,11];
+const DIRS=[[0,1],[1,0],[1,1],[1,-1]];
+
+let bd,cur,over,last,win,hist,sc={1:0,2:0};
+let hover=null,wPhase=0,wRAF=null;
+
+/* ── pre-render board bg ── */
+const bgC=document.createElement('canvas');bgC.width=W;bgC.height=W;
+const bgX=bgC.getContext('2d');
+(function initBg(){
+    bgX.fillStyle='#deb756';bgX.fillRect(0,0,W,W);
+    bgX.save();
+    for(let y=0;y<W;y+=2){
+        const a=Math.max(0,.018+Math.sin(y*.1)*.014+Math.sin(y*.37)*.009);
+        bgX.fillStyle=`rgba(120,80,20,${a})`;
+        bgX.fillRect(0,y,W,1.5);
+    }
+    bgX.restore();
+    const v=bgX.createRadialGradient(W/2,W/2,W*.18,W/2,W/2,W*.72);
+    v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(0,0,0,.07)');
+    bgX.fillStyle=v;bgX.fillRect(0,0,W,W);
+
+    bgX.strokeStyle='rgba(75,55,12,.5)';bgX.lineWidth=1;
+    for(let i=0;i<N;i++){
+        const p=PAD+i*CELL;
+        bgX.beginPath();bgX.moveTo(PAD,p);bgX.lineTo(PAD+(N-1)*CELL,p);bgX.stroke();
+        bgX.beginPath();bgX.moveTo(p,PAD);bgX.lineTo(p,PAD+(N-1)*CELL);bgX.stroke();
+    }
+    bgX.strokeStyle='rgba(75,55,12,.72)';bgX.lineWidth=2;
+    bgX.strokeRect(PAD,PAD,(N-1)*CELL,(N-1)*CELL);
+
+    bgX.fillStyle='rgba(75,55,12,.6)';
+    for(const r of STARS)for(const c of STARS){
+        bgX.beginPath();bgX.arc(PAD+c*CELL,PAD+r*CELL,3.5,0,Math.PI*2);bgX.fill();
+    }
+})();
+
+/* ── draw helpers ── */
+function drawStone(r,c,p,isW){
+    const x=PAD+c*CELL,y=PAD+r*CELL;
+    ctx.save();
+    ctx.shadowColor='rgba(0,0,0,.32)';ctx.shadowBlur=5;ctx.shadowOffsetX=2;ctx.shadowOffsetY=2;
+    const g=ctx.createRadialGradient(x-SR*.25,y-SR*.25,SR*.1,x,y,SR);
+    if(p===1){g.addColorStop(0,'#555');g.addColorStop(.5,'#222');g.addColorStop(1,'#080808')}
+    else{g.addColorStop(0,'#fff');g.addColorStop(.5,'#f0ece4');g.addColorStop(1,'#c0b8a8')}
+    ctx.beginPath();ctx.arc(x,y,SR,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
+    if(isW){
+        ctx.shadowColor='#ffd700';ctx.shadowBlur=12+Math.sin(wPhase)*7;
+        ctx.strokeStyle=`rgba(255,215,0,${.55+Math.sin(wPhase)*.35})`;ctx.lineWidth=2.5;ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function drawGhost(r,c){
+    if(bd[r][c])return;
+    const x=PAD+c*CELL,y=PAD+r*CELL;
+    ctx.save();ctx.globalAlpha=.22;
+    const g=ctx.createRadialGradient(x-SR*.25,y-SR*.25,SR*.1,x,y,SR);
+    if(cur===1){g.addColorStop(0,'#555');g.addColorStop(1,'#080808')}
+    else{g.addColorStop(0,'#fff');g.addColorStop(1,'#c0b8a8')}
+    ctx.beginPath();ctx.arc(x,y,SR,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
+    ctx.restore();
+}
+
+function render(){
+    ctx.drawImage(bgC,0,0);
+    for(let r=0;r<N;r++)for(let c=0;c<N;c++){
+        if(bd[r][c]){
+            const iw=win&&win.some(([wr,wc])=>wr===r&&wc===c);
+            drawStone(r,c,bd[r][c],iw);
+        }
+    }
+    if(last){
+        const x=PAD+last[1]*CELL,y=PAD+last[0]*CELL;
+        ctx.save();ctx.fillStyle='#e04040';ctx.globalAlpha=.82;
+        ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();ctx.restore();
+    }
+    if(hover&&!over)drawGhost(hover.r,hover.c);
+}
+
+/* ── logic ── */
+function check(r,c,p){
+    for(const[dr,dc]of DIRS){
+        let cnt=1;
+        for(let i=1;i<5;i++){const nr=r+dr*i,nc=c+dc*i;if(nr>=0&&nr<N&&nc>=0&&nc<N&&bd[nr][nc]===p)cnt++;else break}
+        for(let i=1;i<5;i++){const nr=r-dr*i,nc=c-dc*i;if(nr>=0&&nr<N&&nc>=0&&nc<N&&bd[nr][nc]===p)cnt++;else break}
+        if(cnt>=5)return true;
+    }return false;
+}
+function getLine(r,c,p){
+    for(const[dr,dc]of DIRS){
+        let ln=[[r,c]];
+        for(let i=1;i<5;i++){const nr=r+dr*i,nc=c+dc*i;if(nr>=0&&nr<N&&nc>=0&&nc<N&&bd[nr][nc]===p)ln.push([nr,nc]);else break}
+        for(let i=1;i<5;i++){const nr=r-dr*i,nc=c-dc*i;if(nr>=0&&nr<N&&nc>=0&&nc<N&&bd[nr][nc]===p)ln.push([nr,nc]);else break}
+        if(ln.length>=5)return ln;
+    }return null;
+}
+
+function place(r,c){
+    if(bd[r][c]||over)return;
+    bd[r][c]=cur;hist.push({r,c,p:cur});last=[r,c];
+    if(check(r,c,cur)){
+        over=true;win=getLine(r,c,cur);sc[cur]++;
+        s1E.textContent=sc[1];s2E.textContent=sc[2];
+        setStatus(cur===1?'黑棋获胜！':'白棋获胜！');startWin();
+    }else if(hist.length===N*N){
+        over=true;setStatus('平局！');
+    }else{cur=cur===1?2:1;setStatus()}
+    render();cv.style.cursor=over?'default':'pointer';
+}
+
+function undo(){
+    if(!hist.length||over)return;
+    const m=hist.pop();bd[m.r][m.c]=0;cur=m.p;
+    last=hist.length?[hist[hist.length-1].r,hist[hist.length-1].c]:null;
+    win=null;if(wRAF)cancelAnimationFrame(wRAF);wPhase=0;
+    setStatus();render();
+}
+
+function setStatus(msg){
+    if(msg){st.innerHTML=`<span class="win-text">${msg}</span>`}
+    else{const cls=cur===1?'bk':'wh',nm=cur===1?'黑棋':'白棋';st.innerHTML=`<span class="dot ${cls}"></span><span>${nm}的回合</span>`}
+}
+
+function startWin(){
+    wPhase=0;
+    (function anim(){wPhase+=.07;render();if(over&&win)wRAF=requestAnimationFrame(anim)})();
+}
+
+function posOf(mx,my){
+    const c=Math.round((mx-PAD)/CELL),r=Math.round((my-PAD)/CELL);
+    if(r>=0&&r<N&&c>=0&&c<N)return{r,c};return null;
+}
+
+/* ── events ── */
+cv.addEventListener('mousemove',e=>{
+    const rc=cv.getBoundingClientRect();
+    hover=posOf((e.clientX-rc.left)*W/rc.width,(e.clientY-rc.top)*W/rc.height);
+    if(!over)render();
+});
+cv.addEventListener('mouseleave',()=>{hover=null;if(!over)render()});
+cv.addEventListener('click',e=>{
+    const rc=cv.getBoundingClientRect();
+    const p=posOf((e.clientX-rc.left)*W/rc.width,(e.clientY-rc.top)*W/rc.height);
+    if(p)place(p.r,p.c);
+});
+cv.addEventListener('touchstart',e=>{
+    e.preventDefault();const t=e.touches[0],rc=cv.getBoundingClientRect();
+    const p=posOf((t.clientX-rc.left)*W/rc.width,(t.clientY-rc.top)*W/rc.height);
+    if(p)place(p.r,p.c);
+},{passive:false});
+
+document.getElementById('rstBtn').addEventListener('click',init);
+document.getElementById('undoBtn').addEventListener('click',undo);
+
+function init(){
+    bd=Array.from({length:N},()=>Array(N).fill(0));
+    cur=1;over=false;last=null;win=null;hist=[];hover=null;
+    if(wRAF)cancelAnimationFrame(wRAF);wPhase=0;
+    setStatus();cv.style.cursor='pointer';render();
+}
+
+init();
+</script>
+</body>
+</html>
